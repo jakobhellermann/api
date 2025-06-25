@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <RootNamespace>Modding</RootNamespace>
         <AssemblyName>Assembly-CSharp.mm</AssemblyName>
@@ -26,7 +26,7 @@
     </ItemGroup>
 
     <PropertyGroup>
-        <OutputDir>../OutputFinal</OutputDir>
+        <OutputDir>$(SolutionDir)/OutputFinal</OutputDir>
         <!-- todo macOS -->
         <GamePath Condition="'$(OS)' == 'Windows_NT'">C:/Program Files (x86)/Steam/steamapps/common/Hollow Knight</GamePath>
         <GamePath Condition="'$(OS)' != 'Windows_NT'">$(HOME)/.local/share/Steam/steamapps/common/Hollow Knight</GamePath>
@@ -94,6 +94,13 @@
         <Warning Condition="'$(RuntimeIdentifier)' == ''" Text="Runtime identifier unknown, pass `--runtime win-x64` to include native dependencies" />
         <!-- on .NET 5 and up, msbuild can automatically copy the relevant files from /runtimes/$RID/native/library.{dll,so,dylib}. Unfortunately, we're on net472 -->
         <Copy Condition="'$(RuntimeIdentifier)' != ''" SourceFiles="$(Pkgunityscenerepacker)/runtimes/$(RuntimeIdentifier)/native/$(NativeLibPrefix)unityscenerepacker$(NativeLibExtension)" DestinationFolder="$(OutputDir)" />
+    </Target>
+    
+    <Target Name="CopyOutputAfterFinal" AfterTargets="OutputFinal" Condition="'$(CopyDir)' != ''">
+        <ItemGroup>
+            <OutputFiles Include="$(OutputDir)\**\*" />
+        </ItemGroup>
+        <Copy SourceFiles="@(OutputFiles)" DestinationFolder="$(CopyDir)" />
     </Target>
     
     <Target Name="CopyOutputAfterFinal" AfterTargets="OutputFinal" Condition="'$(CopyDir)' != ''">
