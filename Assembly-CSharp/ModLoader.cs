@@ -13,6 +13,7 @@ using UObject = UnityEngine.Object;
 using USceneManager = UnityEngine.SceneManagement.SceneManager;
 using Modding.Utils;
 using Mono.Cecil;
+using Mono.Cecil.Cil;
 
 namespace Modding
 {
@@ -399,15 +400,29 @@ namespace Modding
             return asms;
         }
 
+        public class MemorySymbolWriterProvider : ISymbolWriterProvider {
+            public MemoryStream stream = new();
+            public ISymbolWriter GetSymbolWriter(ModuleDefinition module, string fileName) {
+                return module.SymbolReader.GetWriterProvider().GetSymbolWriter(module, stream);
+            }
+            public ISymbolWriter GetSymbolWriter(ModuleDefinition module, Stream symbolStream) => throw new NotImplementedException();
+        }
+
         private static Assembly LoadHotReloadDll(string path) {
             using var dll = AssemblyDefinition.ReadAssembly(path, new ReaderParameters {
                 AssemblyResolver = hotReloadAssemblyResolver,
                 ReadSymbols = true,
             });
             dll.Name.Name = $"{dll.Name.Name}-{DateTime.Now.Ticks}";
+            
             using var ms = new MemoryStream();
-            dll.Write(ms);
-            return Assembly.Load(ms.ToArray());
+            var symbolWriter = new MemorySymbolWriterProvider();
+            dll.Write(ms, new WriterParameters {
+                SymbolWriterProvider = symbolWriter,
+            });
+            
+            byte[] symbols = symbolWriter.stream.ToArray();
+            return Assembly.Load(ms.ToArray(), symbols);
         }
 
 
