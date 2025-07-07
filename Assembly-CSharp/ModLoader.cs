@@ -308,42 +308,56 @@ namespace Modding
             fileSystemWatcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName;
             fileSystemWatcher.Filter = "*.dll";
             fileSystemWatcher.Created += (_, e) => {
-                Logger.APILogger.Log($"Loading mods from {e.FullPath}");
-                LoadModAssembly(e.FullPath);
+                lock (fileSystemWatcher) {
+                    Logger.APILogger.Log($"Loading mods from {e.FullPath}");
+                    LoadModAssembly(e.FullPath);
+                }
             };
             fileSystemWatcher.Deleted += (_, e) => {
-                Logger.APILogger.Log($"Unloading mods from {e.FullPath}");
-                UnloadModAssembly(e.FullPath);
+                lock (fileSystemWatcher) {
+                    Logger.APILogger.Log($"Unloading mods from {e.FullPath}");
+                    UnloadModAssembly(e.FullPath);
+                }
             };
+            // Change may also be called for deletions and renames, so it's important
+            // to be idempotent here
             fileSystemWatcher.Changed += (_, e) => {
-                Logger.APILogger.Log($"Reloading mods from {e.FullPath}");
-                UnloadModAssembly(e.FullPath);
-                LoadModAssembly(e.FullPath);
+                lock (fileSystemWatcher) {
+                    Logger.APILogger.Log($"Reloading mods from {e.FullPath}");
+                    UnloadModAssembly(e.FullPath);
+                    LoadModAssembly(e.FullPath);
+                }
             };
             fileSystemWatcher.Renamed += (_, e) => {
-                Logger.APILogger.Log($"Reloading mods from {e.FullPath}");
-                UnloadModAssembly(e.OldFullPath);
-                LoadModAssembly(e.FullPath);
+                lock (fileSystemWatcher) {
+                    Logger.APILogger.Log($"Reloading mods from {e.FullPath}");
+                    UnloadModAssembly(e.OldFullPath);
+                    LoadModAssembly(e.FullPath);
+                }
             };
             fileSystemWatcher.EnableRaisingEvents = true;
             
             return;
 
             static void UnloadModAssembly(string assemblyPath) {
-                if (ModInstancesByAssembly.TryGetValue(assemblyPath, out List<ModInstance> assemblyMods)) {
-                    foreach (ModInstance mod in assemblyMods) {
-                        if (mod.Mod is not ITogglableMod) {
-                            Logger.APILogger.LogError("Hot reloaded mod contains non-togglable mods");
-                            return;
+                try {
+                    if (ModInstancesByAssembly.TryGetValue(assemblyPath, out List<ModInstance> assemblyMods)) {
+                        foreach (ModInstance mod in assemblyMods) {
+                            if (mod.Mod is not ITogglableMod) {
+                                Logger.APILogger.LogError("Hot reloaded mod contains non-togglable mods");
+                                return;
+                            }
+                            UnloadMod(mod);
+                            ModInstances.Remove(mod);
+                            ModInstanceNameMap.Remove(mod.Name);
+                            ModInstanceTypeMap.Remove(mod.Mod.GetType());
                         }
-                        UnloadMod(mod);
-                        ModInstances.Remove(mod);
-                        ModInstanceNameMap.Remove(mod.Name);
-                        ModInstanceTypeMap.Remove(mod.Mod.GetType());
+                        ModInstancesByAssembly.Remove(assemblyPath);
+                    } else {
+                        Logger.APILogger.LogWarn($"No mods loaded for changed assembly '{assemblyPath}'");
                     }
-                    ModInstancesByAssembly.Remove(assemblyPath);
-                } else {
-                    Logger.APILogger.LogWarn($"No mods loaded for changed assembly '{assemblyPath}'");
+                } catch (Exception e) {
+                    Logger.APILogger.LogError($"Error trying to unload mods in {assemblyPath}:\n{e}");
                 }
             }
 
@@ -353,11 +367,19 @@ namespace Modding
                     return;
                 }
             
-                var assembly = LoadHotReloadDll(assemblyPath);
-                List<ModInstance> newAssemblyMods = InstantiateMods(assembly);
-                ModInstancesByAssembly[assemblyPath] = newAssemblyMods;
-                foreach (var mod in newAssemblyMods) {
-                    LoadMod(mod, false, preloadedObjects: null); // TODO preloadedObjects
+                try {
+                    // Renames sometimes emit [Changed, Created, Deleted]
+                    if (!File.Exists(assemblyPath)) {
+                        return;
+                    }
+                    var assembly = LoadHotReloadDll(assemblyPath);
+                    List<ModInstance> newAssemblyMods = InstantiateMods(assembly);
+                    ModInstancesByAssembly[assemblyPath] = newAssemblyMods;
+                    foreach (var mod in newAssemblyMods) {
+                        LoadMod(mod, false, preloadedObjects: null); // TODO preloadedObjects
+                    }
+                } catch (Exception e) {
+                    Logger.APILogger.LogError($"Error trying to load mods in {assemblyPath}:\n{e}");
                 }
             }
         }
