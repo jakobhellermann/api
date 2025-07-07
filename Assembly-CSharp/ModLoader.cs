@@ -12,6 +12,7 @@ using UnityEngine.SceneManagement;
 using UObject = UnityEngine.Object;
 using USceneManager = UnityEngine.SceneManagement.SceneManager;
 using Modding.Utils;
+using Mono.Cecil;
 
 namespace Modding
 {
@@ -37,6 +38,17 @@ namespace Modding
         public static Dictionary<Type, ModInstance> ModInstanceTypeMap { get; private set; } = new();
         public static Dictionary<string, ModInstance> ModInstanceNameMap { get; private set; } = new();
         public static HashSet<ModInstance> ModInstances { get; private set; } = new();
+
+        private static Dictionary<string, List<ModInstance>> ModInstancesByAssembly = new();
+        
+        private static string ManagedPath = SystemInfo.operatingSystemFamily switch
+        {
+            OperatingSystemFamily.Windows => Path.Combine(Application.dataPath, "Managed"),
+            OperatingSystemFamily.MacOSX => Path.Combine(Application.dataPath, "Resources", "Data", "Managed"),
+            OperatingSystemFamily.Linux => Path.Combine(Application.dataPath, "Managed"),
+            OperatingSystemFamily.Other => null,
+            _ => throw new ArgumentOutOfRangeException(),
+        };
 
         /// <summary>
         /// Try to add a ModInstance to the internal dictionaries.
@@ -85,23 +97,10 @@ namespace Modding
 
             Logger.APILogger.Log("Starting mod loading");
 
-            string managed_path = SystemInfo.operatingSystemFamily switch
-            {
-                OperatingSystemFamily.Windows => Path.Combine(Application.dataPath, "Managed"),
-                OperatingSystemFamily.MacOSX => Path.Combine(Application.dataPath, "Resources", "Data", "Managed"),
-                OperatingSystemFamily.Linux => Path.Combine(Application.dataPath, "Managed"),
-
-                OperatingSystemFamily.Other => null,
-
-                _ => throw new ArgumentOutOfRangeException()
-            };
-
-            if (managed_path is null)
+            if (ManagedPath is null)
             {
                 LoadState |= ModLoadState.Loaded;
-
                 UObject.Destroy(coroutineHolder);
-
                 yield break;
             }
 
@@ -110,114 +109,22 @@ namespace Modding
 
             Logger.APILogger.LogDebug($"Loading assemblies and constructing mods");
 
-            string mods = Path.Combine(managed_path, "Mods");
+            string mods = Path.Combine(ManagedPath, "Mods");
+            string hotReloadMods = Path.Combine(ManagedPath, "ModsHotReload");
+            
+            List<(string, Assembly)> modAssemblies = GetModAssemblies(mods);
+            List<(string, Assembly)> hotReloadModAssemblies = GetHotReloadModAssemblies(hotReloadMods);
+            StartFileSystemWatcher(hotReloadMods);
 
-            string[] files = Directory.GetDirectories(mods)
-                .Except(new string[] { Path.Combine(mods, "Disabled") })
-                .SelectMany(d => Directory.GetFiles(d, "*.dll"))
-                .ToArray();
-
-            Logger.APILogger.LogDebug(string.Join(",\n", files));
-
-            Assembly Resolve(object sender, ResolveEventArgs args)
-            {
-                var asm_name = new AssemblyName(args.Name);
-
-                if (files.FirstOrDefault(x => x.EndsWith($"{asm_name.Name}.dll")) is string path)
-                    return Assembly.LoadFrom(path);
-
-                return null;
-            }
-
-            AppDomain.CurrentDomain.AssemblyResolve += Resolve;
-
-            List<Assembly> asms = new(files.Length);
-
-            // Load all the assemblies first to avoid dependency issues
-            // Dependencies are lazy-loaded, so we won't have attempted loads
-            // until the mod initialization.
-            foreach (string path in files)
-            {
-                Logger.APILogger.LogDebug($"Loading assembly `{path}`");
-
-                try
-                {
-                    asms.Add(Assembly.LoadFrom(path));
-                }
-                catch (FileLoadException e)
-                {
-                    Logger.APILogger.LogError($"Unable to load assembly - {e}");
-                }
-                catch (BadImageFormatException e)
-                {
-                    Logger.APILogger.LogError($"Assembly is bad image. {e}");
-                }
-                catch (PathTooLongException)
-                {
-                    Logger.APILogger.LogError("Unable to load, path to dll is too long!");
-                }
-            }
-
-            foreach (Assembly asm in asms)
+            foreach ((string _, Assembly asm) in modAssemblies)
             {
                 Logger.APILogger.LogDebug($"Loading mods in assembly `{asm.FullName}`");
-                
-                bool foundMod = false;
-
-                try
-                {
-                    foreach (Type ty in asm.GetTypesSafely())
-                    {
-                        if (!ty.IsClass || ty.IsAbstract || !ty.IsSubclassOf(typeof(Mod)))
-                            continue;
-
-                        foundMod = true;
-
-                        Logger.APILogger.LogDebug($"Constructing mod `{ty.FullName}`");
-
-                        try
-                        {
-                            if (ty.GetConstructor(Type.EmptyTypes)?.Invoke(Array.Empty<object>()) is Mod mod)
-                            {
-                                TryAddModInstance(
-                                    ty,
-                                    new ModInstance
-                                    {
-                                        Mod = mod,
-                                        Enabled = false,
-                                        Error = null,
-                                        Name = mod.GetName()
-                                    }
-                                );
-                            }
-                        }
-                        catch (Exception e)
-                        {
-                            Logger.APILogger.LogError(e);
-
-                            TryAddModInstance(
-                                ty,
-                                new ModInstance
-                                {
-                                    Mod = null,
-                                    Enabled = false,
-                                    Error = ModErrorState.Construct,
-                                    Name = ty.Name
-                                }
-                            );
-                        }
-                    }
-                }
-                catch (Exception e)
-                {
-                    Logger.APILogger.LogError(e);
-                }
-
-                if (!foundMod)
-                {
-                    AssemblyName info = asm.GetName();
-                    Logger.APILogger.Log($"Assembly {info.Name} ({info.Version}) loaded with 0 mods");
-                }
+                InstantiateMods(asm);
+            }
+            foreach ((string path, Assembly asm) in hotReloadModAssemblies)
+            {
+                Logger.APILogger.LogDebug($"Loading mods in hot reload assembly `{asm.FullName}`");
+                ModInstancesByAssembly[path] = InstantiateMods(asm);
             }
 
             var scenes = new List<string>();
@@ -294,6 +201,195 @@ namespace Modding
 
             UObject.Destroy(coroutineHolder.gameObject);
         }
+
+        private static List<ModInstance> InstantiateMods(Assembly asm) {
+            bool foundMod = false;
+
+            List<ModInstance> modInstances = [];
+
+            try {
+                foreach (Type ty in asm.GetTypesSafely()) {
+                    if (!ty.IsClass || ty.IsAbstract || !ty.IsSubclassOf(typeof(Mod)))
+                        continue;
+
+                    foundMod = true;
+
+                    Logger.APILogger.LogDebug($"Constructing mod `{ty.FullName}`");
+
+                    try {
+                        if (ty.GetConstructor(Type.EmptyTypes)?.Invoke([]) is Mod mod) {
+                            var instance = new ModInstance {
+                                Mod = mod,
+                                Enabled = false,
+                                Error = null,
+                                Name = mod.GetName(),
+                            };
+                            modInstances.Add(instance);
+                            TryAddModInstance(ty, instance);
+                        }
+                    } catch (Exception e) {
+                        Logger.APILogger.LogError(e);
+                        var instance = new ModInstance {
+                            Mod = null,
+                            Enabled = false,
+                            Error = ModErrorState.Construct,
+                            Name = ty.Name,
+                        };
+                        modInstances.Add(instance);
+                        TryAddModInstance(ty, instance);
+                    }
+                }
+            } catch (Exception e) {
+                Logger.APILogger.LogError(e);
+            }
+
+            if (!foundMod) {
+                AssemblyName info = asm.GetName();
+                Logger.APILogger.Log($"Assembly {info.Name} ({info.Version}) loaded with 0 mods");
+            }
+
+            return modInstances;
+        }
+
+        private static List<(string, Assembly)> GetModAssemblies(string mods) {
+            string[] files = Directory.GetDirectories(mods)
+                                      .Except(new string[] { Path.Combine(mods, "Disabled") })
+                                      .SelectMany(d => Directory.GetFiles(d, "*.dll"))
+                                      .ToArray();
+
+            Logger.APILogger.LogDebug(string.Join(",\n", files));
+
+            Assembly Resolve(object sender, ResolveEventArgs args)
+            {
+                var asm_name = new AssemblyName(args.Name);
+
+                if (files.FirstOrDefault(x => x.EndsWith($"{asm_name.Name}.dll")) is string path)
+                    return Assembly.LoadFrom(path);
+
+                return null;
+            }
+
+            AppDomain.CurrentDomain.AssemblyResolve += Resolve;
+
+            List<(string, Assembly)> asms = new(files.Length);
+
+            // Load all the assemblies first to avoid dependency issues
+            // Dependencies are lazy-loaded, so we won't have attempted loads
+            // until the mod initialization.
+            foreach (string path in files)
+            {
+                Logger.APILogger.LogDebug($"Loading assembly `{path}`");
+
+                try {
+                    asms.Add((path, Assembly.LoadFrom(path)));
+                }
+                catch (FileLoadException e)
+                {
+                    Logger.APILogger.LogError($"Unable to load assembly - {e}");
+                }
+                catch (BadImageFormatException e)
+                {
+                    Logger.APILogger.LogError($"Assembly is bad image. {e}");
+                }
+                catch (PathTooLongException)
+                {
+                    Logger.APILogger.LogError("Unable to load, path to dll is too long!");
+                }
+            }
+
+            return asms;
+        }
+
+        private static void StartFileSystemWatcher(string mods) {
+            var fileSystemWatcher = new FileSystemWatcher(mods) {
+                IncludeSubdirectories = true,
+            };
+            fileSystemWatcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName;
+            fileSystemWatcher.Filter = "*.dll";
+            fileSystemWatcher.Created += (_, e) => {
+                Logger.APILogger.Log($"Loading mods from {e.FullPath}");
+                LoadModAssembly(e.FullPath);
+            };
+            fileSystemWatcher.Deleted += (_, e) => {
+                Logger.APILogger.Log($"Unloading mods from {e.FullPath}");
+                UnloadModAssembly(e.FullPath);
+            };
+            fileSystemWatcher.Changed += (_, e) => {
+                Logger.APILogger.Log($"Reloading mods from {e.FullPath}");
+                UnloadModAssembly(e.FullPath);
+                LoadModAssembly(e.FullPath);
+            };
+            fileSystemWatcher.Renamed += (_, e) => {
+                Logger.APILogger.Log($"Reloading mods from {e.FullPath}");
+                UnloadModAssembly(e.OldFullPath);
+                LoadModAssembly(e.FullPath);
+            };
+            fileSystemWatcher.EnableRaisingEvents = true;
+            
+            return;
+
+            static void UnloadModAssembly(string assemblyPath) {
+                if (ModInstancesByAssembly.TryGetValue(assemblyPath, out List<ModInstance> assemblyMods)) {
+                    foreach (ModInstance mod in assemblyMods) {
+                        if (mod.Mod is not ITogglableMod) {
+                            Logger.APILogger.LogError("Hot reloaded mod contains non-togglable mods");
+                            return;
+                        }
+                        UnloadMod(mod);
+                        ModInstances.Remove(mod);
+                        ModInstanceNameMap.Remove(mod.Name);
+                        ModInstanceTypeMap.Remove(mod.Mod.GetType());
+                    }
+                    ModInstancesByAssembly.Remove(assemblyPath);
+                } else {
+                    Logger.APILogger.LogWarn($"No mods loaded for changed assembly '{assemblyPath}'");
+                }
+            }
+
+            static void LoadModAssembly(string assemblyPath) {
+                if (ModInstancesByAssembly.TryGetValue(assemblyPath, out _)) {
+                    Logger.APILogger.LogError($"Did not hot reload mods because they old ones were still loaded {assemblyPath}");
+                    return;
+                }
+            
+                var assembly = LoadHotReloadDll(assemblyPath);
+                List<ModInstance> newAssemblyMods = InstantiateMods(assembly);
+                ModInstancesByAssembly[assemblyPath] = newAssemblyMods;
+                foreach (var mod in newAssemblyMods) {
+                    LoadMod(mod, false, preloadedObjects: null); // TODO preloadedObjects
+                }
+            }
+        }
+
+        private static List<(string, Assembly)> GetHotReloadModAssemblies(string hotReloadMods) {
+            string[] files = Directory.GetDirectories(hotReloadMods)
+                                      .Except([Path.Combine(hotReloadMods, "Disabled")])
+                                      .SelectMany(d => Directory.GetFiles(d, "*.dll"))
+                                      .ToArray();
+            Logger.APILogger.LogDebug("Hot reload: " + string.Join(",\n", files));
+
+            List<(string, Assembly)> asms = new();
+            foreach (string path in files) {
+                asms.Add((path, Assembly.LoadFrom(path)));
+            }
+
+            return asms;
+        }
+
+        private static Assembly LoadHotReloadDll(string path) {
+            var resolver = new DefaultAssemblyResolver(); // perf: reuse
+            resolver.AddSearchDirectory(ManagedPath);
+
+            using var dll = AssemblyDefinition.ReadAssembly(path, new ReaderParameters {
+                AssemblyResolver = resolver,
+                ReadSymbols = true,
+            });
+            dll.Name.Name = $"{dll.Name.Name}-{DateTime.Now.Ticks}";
+            using var ms = new MemoryStream();
+            dll.Write(ms);
+            return Assembly.Load(ms.ToArray());
+        }
+
 
         private static void GetPreloads
         (
