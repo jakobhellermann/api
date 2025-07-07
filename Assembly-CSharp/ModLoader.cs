@@ -206,7 +206,9 @@ namespace Modding
 
             UpdateModText();
             
-            StartFileSystemWatcher(mods);
+            if (ModHooks.GlobalSettings.EnableHotReload) {
+                StartFileSystemWatcher(mods);
+            }
 
             // Adding version nums to the modlog by default to make debugging significantly easier
             Logger.APILogger.Log("Finished loading mods:\n" + modVersionDraw.drawString);
