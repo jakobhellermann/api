@@ -126,11 +126,11 @@ namespace Modding
             }
             
             List<(string, Assembly)> modAssemblies = GetModAssemblies(modFiles);
-            StartFileSystemWatcher(mods);
 
             foreach ((string path, Assembly asm) in modAssemblies)
             {
                 Logger.APILogger.LogDebug($"Loading mods in assembly `{asm.FullName}`");
+                // ReSharper disable once InconsistentlySynchronizedField the watcher hasn't started yet
                 ModInstancesByAssembly[path] = InstantiateMods(asm);
             }
 
@@ -197,6 +197,8 @@ namespace Modding
             UObject.DontDestroyOnLoad(version);
 
             UpdateModText();
+            
+            StartFileSystemWatcher(mods);
 
             // Adding version nums to the modlog by default to make debugging significantly easier
             Logger.APILogger.Log("Finished loading mods:\n" + modVersionDraw.drawString);
