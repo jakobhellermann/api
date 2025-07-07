@@ -41,6 +41,8 @@ namespace Modding
 
         private static Dictionary<string, List<ModInstance>> ModInstancesByAssembly = new();
         
+        private static DefaultAssemblyResolver hotReloadAssemblyResolver;
+        
         private static string ManagedPath = SystemInfo.operatingSystemFamily switch
         {
             OperatingSystemFamily.Windows => Path.Combine(Application.dataPath, "Managed"),
@@ -111,13 +113,23 @@ namespace Modding
 
             string mods = Path.Combine(ManagedPath, "Mods");
             
-            List<(string, Assembly)> modAssemblies = GetModAssemblies(mods);
+            string[] modDirectories = Directory.GetDirectories(mods)
+                                      .Except([Path.Combine(mods, "Disabled")])
+                                      .ToArray();
+            string[] modFiles = modDirectories
+                                .SelectMany(d => Directory.GetFiles(d, "*.dll"))
+                                .ToArray();
+            hotReloadAssemblyResolver = new DefaultAssemblyResolver();
+            foreach (string modDirectory in modDirectories) {
+                hotReloadAssemblyResolver.AddSearchDirectory(modDirectory);
+            }
+            
+            List<(string, Assembly)> modAssemblies = GetModAssemblies(modFiles);
             StartFileSystemWatcher(mods);
 
             foreach ((string path, Assembly asm) in modAssemblies)
             {
                 Logger.APILogger.LogDebug($"Loading mods in assembly `{asm.FullName}`");
-                InstantiateMods(asm);
                 ModInstancesByAssembly[path] = InstantiateMods(asm);
             }
 
@@ -245,12 +257,7 @@ namespace Modding
             return modInstances;
         }
 
-        private static List<(string, Assembly)> GetModAssemblies(string mods) {
-            string[] files = Directory.GetDirectories(mods)
-                                      .Except(new string[] { Path.Combine(mods, "Disabled") })
-                                      .SelectMany(d => Directory.GetFiles(d, "*.dll"))
-                                      .ToArray();
-
+        private static List<(string, Assembly)> GetModAssemblies(string[] files) {
             Logger.APILogger.LogDebug(string.Join(",\n", files));
 
             Assembly Resolve(object sender, ResolveEventArgs args)
@@ -371,11 +378,8 @@ namespace Modding
         }
 
         private static Assembly LoadHotReloadDll(string path) {
-            var resolver = new DefaultAssemblyResolver(); // perf: reuse
-            resolver.AddSearchDirectory(ManagedPath);
-
             using var dll = AssemblyDefinition.ReadAssembly(path, new ReaderParameters {
-                AssemblyResolver = resolver,
+                AssemblyResolver = hotReloadAssemblyResolver,
                 ReadSymbols = true,
             });
             dll.Name.Name = $"{dll.Name.Name}-{DateTime.Now.Ticks}";
