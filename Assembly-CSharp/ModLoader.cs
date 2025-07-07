@@ -110,20 +110,14 @@ namespace Modding
             Logger.APILogger.LogDebug($"Loading assemblies and constructing mods");
 
             string mods = Path.Combine(ManagedPath, "Mods");
-            string hotReloadMods = Path.Combine(ManagedPath, "ModsHotReload");
             
             List<(string, Assembly)> modAssemblies = GetModAssemblies(mods);
-            List<(string, Assembly)> hotReloadModAssemblies = GetHotReloadModAssemblies(hotReloadMods);
-            StartFileSystemWatcher(hotReloadMods);
+            StartFileSystemWatcher(mods);
 
-            foreach ((string _, Assembly asm) in modAssemblies)
+            foreach ((string path, Assembly asm) in modAssemblies)
             {
                 Logger.APILogger.LogDebug($"Loading mods in assembly `{asm.FullName}`");
                 InstantiateMods(asm);
-            }
-            foreach ((string path, Assembly asm) in hotReloadModAssemblies)
-            {
-                Logger.APILogger.LogDebug($"Loading mods in hot reload assembly `{asm.FullName}`");
                 ModInstancesByAssembly[path] = InstantiateMods(asm);
             }
 
