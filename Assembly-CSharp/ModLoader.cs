@@ -339,36 +339,61 @@ namespace Modding
         
         private static ConcurrentQueue<FileSystemEventArgs> hotReloadEvents = new();
 
+        // A single rebuild/copy emits a burst of filesystem events (often Created + Deleted + several
+        // Changed) for the same dll. Coalesce them per path and only act once the path has been quiet
+        // for HotReloadDebounceSeconds, so we never load a half-written assembly or reload several times.
+        private static readonly Dictionary<string, float> pendingReloads = new();
+        private const float HotReloadDebounceSeconds = 0.2f;
+
         internal static void HandleHotReloadEvents()
         {
+            // Drain raw events, remembering the most recent time each path changed.
             while (hotReloadEvents.TryDequeue(out var e))
             {
                 Logger.APILogger.LogDebug($"Got file system event {e.ChangeType} at {e.FullPath}");
-                switch (e.ChangeType)
+                pendingReloads[e.FullPath] = Time.realtimeSinceStartup;
+                if (e is RenamedEventArgs renamed)
                 {
-                    case WatcherChangeTypes.Created:
-                        Logger.APILogger.Log($"Loading mods from {e.FullPath}");
-                        HotLoadModAssembly(e.FullPath);
-                        break;
-                    case WatcherChangeTypes.Deleted:
-                        Logger.APILogger.Log($"Unloading mods from {e.FullPath}");
-                        HotUnloadModAssembly(e.FullPath);
-                        break;
-                    case WatcherChangeTypes.Changed:
-                        Logger.APILogger.Log($"Reloading mods from {e.FullPath}");
-                        HotUnloadModAssembly(e.FullPath);
-                        HotLoadModAssembly(e.FullPath);
-                        break;
-                    case WatcherChangeTypes.Renamed:
-                        var renamedEvent = (RenamedEventArgs) e;
-                        Logger.APILogger.Log($"Reloading mods from {e.FullPath}");
-                        HotUnloadModAssembly(renamedEvent.OldFullPath);
-                        HotLoadModAssembly(renamedEvent.FullPath);
-                        break;
-                    
-                    case WatcherChangeTypes.All:
-                    default: throw new ArgumentOutOfRangeException();
+                    pendingReloads[renamed.OldFullPath] = Time.realtimeSinceStartup;
                 }
+            }
+
+            if (pendingReloads.Count == 0) return;
+
+            // Reload only paths that have settled (no further events within the debounce window).
+            float now = Time.realtimeSinceStartup;
+            List<string> ready = null;
+            foreach (var kv in pendingReloads)
+            {
+                if (now - kv.Value >= HotReloadDebounceSeconds)
+                {
+                    (ready ??= new List<string>()).Add(kv.Key);
+                }
+            }
+
+            if (ready == null) return;
+            foreach (string path in ready)
+            {
+                pendingReloads.Remove(path);
+                ReloadModAssembly(path);
+            }
+        }
+
+        // Idempotent reload: always unload any currently-loaded mods for this path first, then load from
+        // disk if the file still exists. Unloading first makes the "old ones still loaded" case impossible.
+        private static void ReloadModAssembly(string assemblyPath)
+        {
+            bool wasLoaded = ModInstancesByAssembly.ContainsKey(assemblyPath);
+            if (wasLoaded)
+            {
+                Logger.APILogger.Log($"Unloading mods from {assemblyPath}");
+                HotUnloadModAssembly(assemblyPath);
+            }
+
+            if (File.Exists(assemblyPath))
+            {
+                Logger.APILogger.Log($"{(wasLoaded ? "Reloading" : "Loading")} mods from {assemblyPath}");
+                HotLoadModAssembly(assemblyPath);
             }
         }
 

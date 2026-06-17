@@ -111,8 +111,10 @@ namespace Modding
             string globalSettingsFileName = $"{GetType().Name}.GlobalSettings.json";
 
             string location = GetType().Assembly.Location;
-            if (string.IsNullOrEmpty(location))
-            { // TODO: not set while hot reloading
+            // Assembly.Location is empty while hot reloading; only look for a settings file
+            // next to the dll when we actually have a location, otherwise fall through to persistentDataPath.
+            if (!string.IsNullOrEmpty(location))
+            {
                 string directory = Path.GetDirectoryName(location);
                 string globalSettingsOverride = Path.Combine(directory, globalSettingsFileName);
 
