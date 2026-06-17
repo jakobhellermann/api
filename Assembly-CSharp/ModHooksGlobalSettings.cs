@@ -73,6 +73,25 @@ namespace Modding
         public PreloadMode PreloadMode = PreloadMode.RepackAssets;
 
         /// <summary>
+        ///     When enabled, listens for filesystem changes to mod DLLs.
+        ///     On modification, mods will be unloaded, and the new copy of the assembly gets loaded as well.
+        ///     <para><b>Limitations:</b></para>
+        ///     <list type="bullet">
+        ///         <item><description>
+        ///             The old assembly does not get unloaded. If you have created any unity game objects or components,
+        ///             make sure to Destroy them in the mod's Unload function.
+        ///         </description></item>
+        ///         <item><description>
+        ///             Dependencies of mods cannot be hot reloaded. When you modify a dependency DLL, no change will be made to the mod depending on it.
+        ///         </description></item>
+        ///         <item><description>
+        ///             <c>Assembly.location</c> will return an empty string for hot-reloaded mods
+        ///         </description></item>
+        ///     </list>
+        /// </summary>
+        public bool EnableHotReload = false;
+
+        /// <summary>
         ///     Maximum number of days to preserve modlogs for.
         /// </summary>
         public int ModlogMaxAge = 7;

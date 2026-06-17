@@ -31,14 +31,14 @@ namespace Modding.Patches
                 Logger.APILogger.Log("Main menu loading");
                 ModLoader.LoadState = ModLoader.ModLoadState.Started;
 
-                GameObject obj = new GameObject();
+                GameObject obj = new GameObject("Mod Loader");
                 DontDestroyOnLoad(obj);
 
                 // Preload reflection
                 new Thread(ReflectionHelper.PreloadCommonTypes).Start();
 
-                // NonBouncer does absolutely nothing, which makes it a good dummy to run the loader
-                modLoaderObj = obj.AddComponent<NonBouncer>();
+                // ModLoaderObject hosts the loader coroutine and pumps hot-reload events from its Update()
+                modLoaderObj = obj.AddComponent<ModLoaderObject>();
             }
             else
             {
