@@ -674,6 +674,7 @@ namespace Modding
                 {
                     mod.Enabled = false;
                     itmod.Unload();
+                    if (mod.Mod is Mod baseMod) baseMod.UnhookSaveMethods();
                 }
             }
             catch (Exception ex)

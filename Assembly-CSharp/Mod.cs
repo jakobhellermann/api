@@ -9,6 +9,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using MonoMod.Utils;
 using System.Linq;
+using System.Reflection;
 using Newtonsoft.Json.Linq;
 using Lang = TeamCherry.Localization.Language;
 
@@ -63,10 +64,10 @@ namespace Modding
                     switch (mi.Name)
                     {
                         case nameof(IGlobalSettings<object>.OnLoadGlobal):
-                            this.onLoadGlobalSettings = mi.GetFastInvoker();
+                            this.onLoadGlobalSettings = GetSettingsDelegate(mi);
                             break;
                         case nameof(IGlobalSettings<object>.OnSaveGlobal):
-                            this.onSaveGlobalSettings = mi.GetFastInvoker();
+                            this.onSaveGlobalSettings = GetSettingsDelegate(mi);
                             break;
                     }
                 }
@@ -87,10 +88,10 @@ namespace Modding
                     switch (mi.Name)
                     {
                         case nameof(ILocalSettings<object>.OnLoadLocal):
-                            this.onLoadSaveSettings = mi.GetFastInvoker();
+                            this.onLoadSaveSettings = GetSettingsDelegate(mi);
                             break;
                         case nameof(ILocalSettings<object>.OnSaveLocal):
-                            this.onSaveSaveSettings = mi.GetFastInvoker();
+                            this.onSaveSaveSettings = GetSettingsDelegate(mi);
                             break;
                     }
                 }
@@ -196,12 +197,46 @@ namespace Modding
         /// <returns></returns>
         public virtual string GetMenuButtonText() => $"{GetName()} {Lang.Get("MAIN_OPTIONS", "MainMenu")}";
 
+        // Build the fast-invoke delegate from the mod's CONCRETE implementation of a settings method, not
+        // from the interface method. Building it from the interface method bakes a generic-interface
+        // callvirt (e.g. ILocalSettings<TSettings>::OnSaveLocal) into the emitted delegate. Under hot reload
+        // the same-named TSettings type exists in several reloaded assembly images; Mono's generic interface
+        // itable lookup confuses them and hard-aborts the process ("X doesn't implement interface Y") on the
+        // next save/quit. A call to the concrete class method goes through the class vtable and never touches
+        // the interface itable.
+        private FastReflectionHelper.FastInvoker GetSettingsDelegate(MethodInfo interfaceMethod)
+        {
+            Type[] paramTypes = interfaceMethod.GetParameters().Select(p => p.ParameterType).ToArray();
+            MethodInfo impl = GetType().GetMethod(interfaceMethod.Name, paramTypes);
+            if (impl == null)
+            {
+                // Explicit interface implementation: map the interface method to its concrete target.
+                InterfaceMapping map = GetType().GetInterfaceMap(interfaceMethod.DeclaringType);
+                int idx = Array.IndexOf(map.InterfaceMethods, interfaceMethod);
+                if (idx >= 0) impl = map.TargetMethods[idx];
+            }
+            return (impl ?? interfaceMethod).GetFastInvoker();
+        }
+
         private void HookSaveMethods()
         {
             ModHooks.ApplicationQuitHook += SaveGlobalSettings;
             ModHooks.SaveLocalSettings += SaveLocalSettings;
             ModHooks.LoadLocalSettings += LoadLocalSettings;
             UnityEngine.SceneManagement.SceneManager.activeSceneChanged += SceneChanged;
+        }
+
+        // Counterpart to HookSaveMethods, called by ModLoader when a mod is unloaded (e.g. hot reload).
+        // Without this the instance stays subscribed to these process-global events: after a hot reload
+        // dead instances from previous assembly versions accumulate and all fire on the next save, whose
+        // FastInvokers are bound to their now-orphaned assembly's ILocalSettings<T> type ->
+        // cross-version interface dispatch -> native Mono abort.
+        internal void UnhookSaveMethods()
+        {
+            ModHooks.ApplicationQuitHook -= SaveGlobalSettings;
+            ModHooks.SaveLocalSettings -= SaveLocalSettings;
+            ModHooks.LoadLocalSettings -= LoadLocalSettings;
+            UnityEngine.SceneManagement.SceneManager.activeSceneChanged -= SceneChanged;
         }
 
         private void SceneChanged(Scene arg0, Scene arg1)
