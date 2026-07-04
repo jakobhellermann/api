@@ -39,6 +39,13 @@ namespace Modding
         /// </summary>
         public readonly string Name;
 
+        /// <summary>
+        ///     The directory the mod's assembly was loaded from. Set by the loader from the load path, so it is
+        ///     reliable even during hot-reload — unlike <see cref="System.Reflection.Assembly.Location" />, which is
+        ///     empty when the assembly is loaded from an in-memory byte[] (as the hot-reload path does).
+        /// </summary>
+        public string ModDirectory { get; internal set; }
+
         /// <inheritdoc />
         /// <summary>
         ///     Constructs the mod, assigns the instance and sets the name.
@@ -111,13 +118,11 @@ namespace Modding
         {
             string globalSettingsFileName = $"{GetType().Name}.GlobalSettings.json";
 
-            string location = GetType().Assembly.Location;
-            // Assembly.Location is empty while hot reloading; only look for a settings file
-            // next to the dll when we actually have a location, otherwise fall through to persistentDataPath.
-            if (!string.IsNullOrEmpty(location))
+            // Use ModDirectory (set by the loader from the load path) rather than Assembly.Location, which is empty
+            // while hot reloading — so the settings-next-to-dll override now also works across a hot-reload.
+            if (!string.IsNullOrEmpty(ModDirectory))
             {
-                string directory = Path.GetDirectoryName(location);
-                string globalSettingsOverride = Path.Combine(directory, globalSettingsFileName);
+                string globalSettingsOverride = Path.Combine(ModDirectory, globalSettingsFileName);
 
                 if (File.Exists(globalSettingsOverride))
                 {

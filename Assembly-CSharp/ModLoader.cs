@@ -154,7 +154,7 @@ namespace Modding
             {
                 Logger.APILogger.LogDebug($"Loading mods in assembly `{asm.FullName}`");
                 // ReSharper disable once InconsistentlySynchronizedField the watcher hasn't started yet
-                ModInstancesByAssembly[path] = InstantiateMods(asm);
+                ModInstancesByAssembly[path] = InstantiateMods(asm, path);
             }
 
             var scenes = new List<string>();
@@ -233,8 +233,10 @@ namespace Modding
             new ModListMenu().InitMenuCreation();
         }
 
-        private static List<ModInstance> InstantiateMods(Assembly asm)
+        private static List<ModInstance> InstantiateMods(Assembly asm, string assemblyPath)
         {
+            string modDirectory = Path.GetDirectoryName(assemblyPath);
+
             bool foundMod = false;
 
             List<ModInstance> modInstances = [];
@@ -254,6 +256,7 @@ namespace Modding
                     {
                         if (ty.GetConstructor(Type.EmptyTypes)?.Invoke([]) is Mod mod)
                         {
+                            mod.ModDirectory = modDirectory;
                             var instance = new ModInstance {
                                 Mod = mod,
                                 Enabled = false,
@@ -454,7 +457,7 @@ namespace Modding
                     return;
                 }
                 var assembly = LoadHotReloadDll(assemblyPath);
-                List<ModInstance> newAssemblyMods = InstantiateMods(assembly);
+                List<ModInstance> newAssemblyMods = InstantiateMods(assembly, assemblyPath);
                 ModInstancesByAssembly[assemblyPath] = newAssemblyMods;
                 foreach (var mod in newAssemblyMods)
                 {
